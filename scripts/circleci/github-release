@@ -1,0 +1,151 @@
+#!/usr/bin/env bash
+set -e -o pipefail
+
+### helper script for creating GitHub releases from CircleCI jobs
+
+#
+# Global vars
+
+readonly PROG_NAME="${0##*/}"
+
+github_token="$SSG_GITHUB_MERO_PUBLIC_CI_API_TOKEN"
+tag=
+verbose=false
+cli_args=
+
+#
+# Usage
+
+help()
+{
+    [[ $1 == stdout ]] && usage || usage >&2
+    exit 1
+}
+
+usage()
+{
+    cat <<USAGE_END
+Usage: $PROG_NAME [options] artifact1 [artifact2...]
+
+  Helper script for creating GitHub releases from CircleCI jobs.
+
+  Release content is formed from the arguments.
+
+  Options:
+
+    -t|--tag TAG               Git tag that corresponds to the release.
+
+    -g|--github-token TOKEN    Github access token.
+
+    -v|--verbose               Print what's going on.
+
+    -h|--help                  Print this help screen.
+USAGE_END
+}
+
+#
+# Parse CLI options
+
+parse_cli_options()
+{
+    # Note that we use `"$@"' to let each command-line parameter expand to a
+    # separate word. The quotes around `$@' are essential!
+    # We need TEMP as the `eval set --' would nuke the return value of getopt.
+    # We need to separate TEMP declaration and assignment because 'local TEMP='
+    # would nuke the return value of getopt.
+    local TEMP
+    TEMP=$( getopt -o hvt:g: \
+                   -l help,verbose,tag:,github-token: \
+                   -n "$PROG_NAME" -- "$@" )
+
+    [[ $? != 0 ]] && help
+
+    # Note the quotes around `$TEMP': they are essential!
+    eval set -- "$TEMP"
+
+    while true ; do
+        case "$1" in
+            -t|--tag)            tag=$2; shift 2 ;;
+            -g|--github-token)   github_token=$2; shift 2 ;;
+            -v|--verbose)        verbose=true; shift ;;
+            -h|--help)           help stdout ;;
+            --)                  shift; break ;;
+            *)                   echo 'getopt: internal error...'; exit 1 ;;
+        esac
+    done
+
+    # remaining command line arguments
+    cli_args="$@"
+}
+
+#
+# Utility functions
+
+die()
+{
+    echo -e "$PROG_NAME: ERROR: $@" >&2
+    exit 1
+}
+
+warn()
+{
+    echo -e "$PROG_NAME: WARNING: $@" >&2
+}
+
+info()
+{
+    echo -e "--> $@"
+}
+
+log()
+{
+    ! $verbose || echo -e "$@"
+}
+
+create_release()
+{
+    local payload
+    payload=$(jq --null-input \
+                 --arg tag_name "$tag" \
+                 --arg name "Pyghmi SSG $tag" \
+                 '{ tag_name: $tag_name, name: $name }')
+
+    local response
+    response=$(curl -H "Authorization: token $github_token" \
+                    --silent \
+                    --location \
+                    --data "$payload" \
+                    "https://api.github.com/repos/seagate-ssg/pyghmi/releases")
+
+    info 'Verifying GitHub server response'
+    [[ $(echo "$response" | jq .url) != null ]] ||
+        die "failed to create GitHub release for '$tag' tag:\n$response"
+    log "$response"
+
+    local upload_url
+    upload_url=$(echo "$response" | jq -r .upload_url)
+    # strip trailing {?name,label} part
+    upload_url=${upload_url%%{*}
+
+    info 'Uploading artifacts'
+    for artifact in "$@"
+    do
+        info "$artifact"
+        response=$(curl -H "Authorization: token $github_token" \
+                        -H 'Content-Type: octet/binary' \
+                        --silent \
+                        --location \
+                        --data-binary @"$artifact" \
+                        "${upload_url}?name=${artifact##*/}")
+        log "$response"
+    done
+}
+
+#
+# Main
+
+parse_cli_options "$@"
+eval set -- "$cli_args"
+
+info 'Creating GitHub release'
+create_release "$@"

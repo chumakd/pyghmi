@@ -1,0 +1,91 @@
+---
+#
+# Common parts that can be re-used in the actual CircleCI configuration sub-tree
+#
+templates:
+
+  docker_images:
+    - 7.5: &docker-image-75
+        docker:
+          - image: centos:7.5.1804
+
+  filters:
+    - only_master: &filter-only-master
+        branches:
+          only: [ master ]
+
+#
+# CircleCI configuration
+#
+version: 2
+
+
+# CircleCI jobs
+jobs:
+
+  rpmbuild:
+    <<: *docker-image-75
+    working_directory: ~/pyghmi
+    steps:
+      - run:
+          name: Install build deps
+          command: yum install -y git python-setuptools rpm-build
+
+      - checkout
+
+      - run:
+          name: Pyghmi revision
+          command: |
+              git describe
+              git --no-pager log -1
+
+      - run:
+          name: Build rpms
+          command: python setup.py bdist_rpm
+
+      - persist_to_workspace:
+          root: dist
+          paths:
+            - '*'
+
+      - store_artifacts:
+          path: /root/pyghmi/dist
+          destination: rpms
+
+  github_release:
+    <<: *docker-image-75
+    working_directory: ~/pyghmi
+    steps:
+      - run:
+          name: Enable EPEL repo
+          command: yum install -y epel-release
+
+      - run:
+          name: Install deps
+          command: yum install -y git jq
+
+      - checkout
+
+      - attach_workspace:
+          at: dist
+
+      - run:
+          name: Create GitHub release
+          command: |
+              # take only actual tag name with commit distance number, ignoring commit-id
+              tag=$(git describe | cut -d- -f1,2)
+
+              ./scripts/circleci/github-release --tag $tag dist/*
+
+# CircleCI workflows
+workflows:
+  version: 2
+
+  master:
+    jobs:
+      - rpmbuild:
+          filters: *filter-only-master
+
+      - github_release:
+          filters: *filter-only-master
+          requires: [ rpmbuild ]
